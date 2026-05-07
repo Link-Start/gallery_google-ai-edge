@@ -27,8 +27,13 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -55,6 +60,7 @@ import com.google.ai.edge.gallery.ui.theme.emptyStateContent
 import com.google.ai.edge.gallery.ui.theme.emptyStateTitle
 import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.Message
+import kotlinx.coroutines.launch
 
 private const val TAG = "AGLlmChatScreen"
 
@@ -214,123 +220,128 @@ fun ChatViewWrapper(
 ) {
   val context = LocalContext.current
   val task = modelManagerViewModel.getTaskById(id = taskId)!!
+  val scope = rememberCoroutineScope()
+  val snackbarHostState = remember { SnackbarHostState() }
 
-  ChatView(
-    task = task,
-    viewModel = viewModel,
-    modelManagerViewModel = modelManagerViewModel,
-    onSendMessage = { model, messages ->
-      for (message in messages) {
-        viewModel.addMessage(model = model, message = message)
-      }
+  Box(modifier = Modifier.fillMaxSize()) {
+    ChatView(
+      task = task,
+      viewModel = viewModel,
+      modelManagerViewModel = modelManagerViewModel,
+      onSendMessage = { model, messages ->
+        for (message in messages) {
+          viewModel.addMessage(model = model, message = message)
+        }
 
-      var text = ""
-      val images: MutableList<Bitmap> = mutableListOf()
-      val audioMessages: MutableList<ChatMessageAudioClip> = mutableListOf()
-      var chatMessageText: ChatMessageText? = null
-      for (message in messages) {
+        var text = ""
+        val images: MutableList<Bitmap> = mutableListOf()
+        val audioMessages: MutableList<ChatMessageAudioClip> = mutableListOf()
+        var chatMessageText: ChatMessageText? = null
+        for (message in messages) {
+          if (message is ChatMessageText) {
+            chatMessageText = message
+            text = message.content
+          } else if (message is ChatMessageImage) {
+            images.addAll(message.bitmaps)
+          } else if (message is ChatMessageAudioClip) {
+            audioMessages.add(message)
+          }
+        }
+        if ((text.isNotEmpty() && chatMessageText != null) || audioMessages.isNotEmpty()) {
+          if (text.isNotEmpty()) {
+            modelManagerViewModel.addTextInputHistory(text)
+          }
+          viewModel.generateResponse(
+            model = model,
+            input = text,
+            images = images,
+            audioMessages = audioMessages,
+            onFirstToken = onFirstToken,
+            onDone = { onGenerateResponseDone(model) },
+            onError = { errorMessage ->
+              viewModel.handleError(
+                context = context,
+                task = task,
+                model = model,
+                errorMessage = errorMessage,
+                modelManagerViewModel = modelManagerViewModel,
+              )
+            },
+            allowThinking = task.allowCapability(ModelCapability.LLM_THINKING, model),
+          )
+
+          val activeSkills = getActiveSkills()
+          Log.d(
+            TAG,
+            "Analytics: generate_action, capability_name=${task.id}, active_skills=${activeSkills.joinToString(",")}",
+          )
+          firebaseAnalytics?.logEvent(
+            GalleryEvent.GENERATE_ACTION.id,
+            Bundle().apply {
+              putString("capability_name", task.id)
+              putString("model_id", model.name)
+              putBoolean("has_image", images.isNotEmpty())
+              putInt("image_count", images.size)
+              putBoolean("has_audio", audioMessages.isNotEmpty())
+              putInt("audio_count", audioMessages.size)
+              putInt("active_skills_count", activeSkills.size)
+              putString("active_skills_list", activeSkills.joinToString(","))
+            },
+          )
+        }
+      },
+      onRunAgainClicked = { model, message ->
         if (message is ChatMessageText) {
-          chatMessageText = message
-          text = message.content
-        } else if (message is ChatMessageImage) {
-          images.addAll(message.bitmaps)
-        } else if (message is ChatMessageAudioClip) {
-          audioMessages.add(message)
+          viewModel.runAgain(
+            model = model,
+            message = message,
+            onError = { errorMessage ->
+              viewModel.handleError(
+                context = context,
+                task = task,
+                model = model,
+                errorMessage = errorMessage,
+                modelManagerViewModel = modelManagerViewModel,
+              )
+            },
+            allowThinking = task.allowCapability(ModelCapability.LLM_THINKING, model),
+          )
         }
-      }
-      if ((text.isNotEmpty() && chatMessageText != null) || audioMessages.isNotEmpty()) {
-        if (text.isNotEmpty()) {
-          modelManagerViewModel.addTextInputHistory(text)
+      },
+      onBenchmarkClicked = { _, _, _, _ -> },
+      onResetSessionClicked = { model, chatMessages, onDone ->
+        val litertMessages = chatMessages.mapNotNull { convertToLitertMessage(it) }
+        if (onResetSessionClickedOverride != null) {
+          onResetSessionClickedOverride(task, model, chatMessages)
+          onDone()
+        } else {
+          viewModel.resetSession(
+            task = task,
+            model = model,
+            systemInstruction = Contents.of(curSystemPrompt),
+            supportImage = showImagePicker,
+            supportAudio = showAudioPicker,
+            initialMessages = litertMessages,
+            onDone = onDone,
+          )
         }
-        viewModel.generateResponse(
-          model = model,
-          input = text,
-          images = images,
-          audioMessages = audioMessages,
-          onFirstToken = onFirstToken,
-          onDone = { onGenerateResponseDone(model) },
-          onError = { errorMessage ->
-            viewModel.handleError(
-              context = context,
-              task = task,
-              model = model,
-              errorMessage = errorMessage,
-              modelManagerViewModel = modelManagerViewModel,
-            )
-          },
-          allowThinking = task.allowCapability(ModelCapability.LLM_THINKING, model),
-        )
-
-        val activeSkills = getActiveSkills()
-        Log.d(
-          TAG,
-          "Analytics: generate_action, capability_name=${task.id}, active_skills=${activeSkills.joinToString(",")}",
-        )
-        firebaseAnalytics?.logEvent(
-          GalleryEvent.GENERATE_ACTION.id,
-          Bundle().apply {
-            putString("capability_name", task.id)
-            putString("model_id", model.name)
-            putBoolean("has_image", images.isNotEmpty())
-            putInt("image_count", images.size)
-            putBoolean("has_audio", audioMessages.isNotEmpty())
-            putInt("audio_count", audioMessages.size)
-            putInt("active_skills_count", activeSkills.size)
-            putString("active_skills_list", activeSkills.joinToString(","))
-          },
-        )
-      }
-    },
-    onRunAgainClicked = { model, message ->
-      if (message is ChatMessageText) {
-        viewModel.runAgain(
-          model = model,
-          message = message,
-          onError = { errorMessage ->
-            viewModel.handleError(
-              context = context,
-              task = task,
-              model = model,
-              errorMessage = errorMessage,
-              modelManagerViewModel = modelManagerViewModel,
-            )
-          },
-          allowThinking = task.allowCapability(ModelCapability.LLM_THINKING, model),
-        )
-      }
-    },
-    onBenchmarkClicked = { _, _, _, _ -> },
-    onResetSessionClicked = { model, chatMessages, onDone ->
-      val litertMessages = chatMessages.mapNotNull { convertToLitertMessage(it) }
-      if (onResetSessionClickedOverride != null) {
-        onResetSessionClickedOverride(task, model, chatMessages)
-        onDone()
-      } else {
-        viewModel.resetSession(
-          task = task,
-          model = model,
-          systemInstruction = Contents.of(curSystemPrompt),
-          supportImage = showImagePicker,
-          supportAudio = showAudioPicker,
-          initialMessages = litertMessages,
-          onDone = onDone,
-        )
-      }
-    },
-    showStopButtonInInputWhenInProgress = true,
-    onStopButtonClicked = { model -> viewModel.stopResponse(model = model) },
-    onSkillClicked = onSkillClicked,
-    navigateUp = navigateUp,
-    modifier = modifier,
-    composableBelowMessageList = composableBelowMessageList,
-    showImagePicker = showImagePicker,
-    emptyStateComposable = emptyStateComposable,
-    allowEditingSystemPrompt = allowEditingSystemPrompt,
-    curSystemPrompt = curSystemPrompt,
-    onSystemPromptChanged = onSystemPromptChanged,
-    sendMessageTrigger = sendMessageTrigger,
-    showAudioPicker = showAudioPicker,
-  )
+      },
+      showStopButtonInInputWhenInProgress = true,
+      onStopButtonClicked = { model -> viewModel.stopResponse(model = model) },
+      onSkillClicked = onSkillClicked,
+      navigateUp = navigateUp,
+      modifier = modifier,
+      composableBelowMessageList = composableBelowMessageList,
+      showImagePicker = showImagePicker,
+      emptyStateComposable = emptyStateComposable,
+      allowEditingSystemPrompt = allowEditingSystemPrompt,
+      curSystemPrompt = curSystemPrompt,
+      onSystemPromptChanged = onSystemPromptChanged,
+      sendMessageTrigger = sendMessageTrigger,
+      showAudioPicker = showAudioPicker,
+    )
+    SnackbarHost(hostState = snackbarHostState, modifier = Modifier.align(Alignment.BottomCenter))
+  }
 }
 
 private fun convertToLitertMessage(chatMessage: ChatMessage): Message? {
