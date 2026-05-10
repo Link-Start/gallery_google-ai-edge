@@ -17,7 +17,10 @@ package com.google.ai.edge.gallery.customtasks.agentchat
 
 import android.content.Context
 import android.content.Intent
+import android.provider.CalendarContract
+import android.provider.CalendarContract.Events
 import android.util.Log
+import androidx.core.content.ContextCompat.checkSelfPermission
 import androidx.core.net.toUri
 import com.google.ai.edge.gallery.notifications.NotificationScheduleManagerEntryPoint
 import com.google.ai.edge.gallery.proto.ScheduledNotification
@@ -26,6 +29,7 @@ import com.squareup.moshi.Moshi
 import dagger.hilt.android.EntryPointAccessors
 import java.lang.Exception
 import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 
@@ -47,10 +51,24 @@ data class CreateCalendarEventParams(
   val end_time: String,
 )
 
+@JsonClass(generateAdapter = true) data class ReadCalendarEventsParams(val date: String)
+
+@JsonClass(generateAdapter = true)
+data class CalendarEventDto(
+  val title: String,
+  val description: String,
+  val begin_time: String,
+  val end_time: String,
+)
+
+@JsonClass(generateAdapter = true)
+data class ReadCalendarEventsResponse(val events: List<CalendarEventDto>)
+
 enum class IntentAction(val action: String) {
   SEND_EMAIL("send_email"),
   SEND_SMS("send_sms"),
   CREATE_CALENDAR_EVENT("create_calendar_event"),
+  READ_CALENDAR_EVENTS("read_calendar_events"),
   GET_CURRENT_DATE_AND_TIME("get_current_date_and_time"),
   SCHEDULE_NOTIFICATION("schedule_notification");
 
@@ -133,11 +151,11 @@ object IntentHandler {
             val endTimeMillis = format.parse(params.end_time)?.time ?: 0L
             val intent =
               Intent(Intent.ACTION_INSERT).apply {
-                data = android.provider.CalendarContract.Events.CONTENT_URI
-                putExtra(android.provider.CalendarContract.Events.TITLE, params.title)
-                putExtra(android.provider.CalendarContract.Events.DESCRIPTION, params.description)
-                putExtra(android.provider.CalendarContract.EXTRA_EVENT_BEGIN_TIME, beginTimeMillis)
-                putExtra(android.provider.CalendarContract.EXTRA_EVENT_END_TIME, endTimeMillis)
+                data = Events.CONTENT_URI
+                putExtra(Events.TITLE, params.title)
+                putExtra(Events.DESCRIPTION, params.description)
+                putExtra(CalendarContract.EXTRA_EVENT_BEGIN_TIME, beginTimeMillis)
+                putExtra(CalendarContract.EXTRA_EVENT_END_TIME, endTimeMillis)
               }
             context.startActivity(intent)
             "succeeded"
@@ -149,6 +167,9 @@ object IntentHandler {
           Log.e(TAG, "Failed to parse create_calendar_event parameters: $parameters", e)
           "failed"
         }
+      }
+      IntentAction.READ_CALENDAR_EVENTS -> {
+        readCalendarEvents(context, parameters)
       }
       IntentAction.GET_CURRENT_DATE_AND_TIME -> {
         val sdf = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss EEEE", Locale.getDefault())
@@ -163,6 +184,98 @@ object IntentHandler {
         scheduleNotification(context, parameters)
       }
       null -> "failed"
+    }
+  }
+
+  fun readCalendarEvents(context: Context, parameters: String): String {
+    if (
+      checkSelfPermission(context, android.Manifest.permission.READ_CALENDAR) !=
+        android.content.pm.PackageManager.PERMISSION_GRANTED
+    ) {
+      Log.e(TAG, "Missing READ_CALENDAR permission")
+      return "failed: missing READ_CALENDAR permission"
+    }
+
+    try {
+      val moshi = Moshi.Builder().build()
+      val jsonAdapter = moshi.adapter(ReadCalendarEventsParams::class.java)
+      val params = jsonAdapter.fromJson(parameters)
+      if (params != null) {
+        val format = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
+        val dateObj = format.parse(params.date)
+        if (dateObj != null) {
+          val cal =
+            Calendar.getInstance().apply {
+              timeInMillis = dateObj.time
+              set(Calendar.HOUR_OF_DAY, 0)
+              set(Calendar.MINUTE, 0)
+              set(Calendar.SECOND, 0)
+              set(Calendar.MILLISECOND, 0)
+            }
+          val startOfDayMillis = cal.timeInMillis
+
+          cal.apply {
+            add(Calendar.DAY_OF_MONTH, 1)
+            add(Calendar.MILLISECOND, -1)
+          }
+          val endOfDayMillis = cal.timeInMillis
+
+          val projection =
+            arrayOf(
+              android.provider.CalendarContract.Instances.TITLE,
+              android.provider.CalendarContract.Instances.DESCRIPTION,
+              android.provider.CalendarContract.Instances.BEGIN,
+              android.provider.CalendarContract.Instances.END,
+            )
+
+          val builder = android.provider.CalendarContract.Instances.CONTENT_URI.buildUpon()
+          android.content.ContentUris.appendId(builder, startOfDayMillis)
+          android.content.ContentUris.appendId(builder, endOfDayMillis)
+
+          val cursor =
+            context.contentResolver.query(
+              builder.build(),
+              projection,
+              null,
+              null,
+              "${android.provider.CalendarContract.Instances.BEGIN} ASC",
+            )
+
+          val eventsList = mutableListOf<CalendarEventDto>()
+          cursor?.use { c ->
+            val titleIdx = c.getColumnIndex(android.provider.CalendarContract.Instances.TITLE)
+            val descIdx = c.getColumnIndex(android.provider.CalendarContract.Instances.DESCRIPTION)
+            val startIdx = c.getColumnIndex(android.provider.CalendarContract.Instances.BEGIN)
+            val endIdx = c.getColumnIndex(android.provider.CalendarContract.Instances.END)
+            val timeFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.getDefault())
+            while (c.moveToNext()) {
+              val title = if (titleIdx >= 0) c.getString(titleIdx) ?: "" else ""
+              val desc = if (descIdx >= 0) c.getString(descIdx) ?: "" else ""
+              val start = if (startIdx >= 0) c.getLong(startIdx) else 0L
+              val end = if (endIdx >= 0) c.getLong(endIdx) else 0L
+              eventsList.add(
+                CalendarEventDto(
+                  title = title,
+                  description = desc,
+                  begin_time = if (start > 0) timeFormat.format(Date(start)) else "",
+                  end_time = if (end > 0) timeFormat.format(Date(end)) else "",
+                )
+              )
+            }
+          }
+          val responseAdapter = moshi.adapter(ReadCalendarEventsResponse::class.java)
+          return responseAdapter.toJson(ReadCalendarEventsResponse(eventsList))
+        } else {
+          Log.e(TAG, "Failed to parse read_calendar_events date: ${params.date}")
+          return "failed"
+        }
+      } else {
+        Log.e(TAG, "Failed to parse read_calendar_events parameters: $parameters")
+        return "failed"
+      }
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed to read calendar events: $parameters", e)
+      return "failed: ${e.message}"
     }
   }
 

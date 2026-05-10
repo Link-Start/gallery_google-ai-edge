@@ -17,6 +17,7 @@ package com.google.ai.edge.gallery.customtasks.agentchat
 
 import android.content.Context
 import android.util.Log
+import androidx.core.content.ContextCompat.checkSelfPermission
 import com.google.ai.edge.gallery.common.AgentAction
 import com.google.ai.edge.gallery.common.AskInfoAgentAction
 import com.google.ai.edge.gallery.common.CallJsAgentAction
@@ -24,6 +25,7 @@ import com.google.ai.edge.gallery.common.CallJsSkillResult
 import com.google.ai.edge.gallery.common.CallJsSkillResultImage
 import com.google.ai.edge.gallery.common.CallJsSkillResultWebview
 import com.google.ai.edge.gallery.common.LOCAL_URL_BASE
+import com.google.ai.edge.gallery.common.RequestPermissionAgentAction
 import com.google.ai.edge.gallery.common.SkillProgressAgentAction
 import com.google.ai.edge.litertlm.Tool
 import com.google.ai.edge.litertlm.ToolParam
@@ -231,6 +233,27 @@ open class AgentTools() : ToolSet {
   ): Map<String, String> {
     return runBlocking(Dispatchers.Default) {
       Log.d(TAG, "Run intent. Intent: '$intent', parameters: '$parameters'")
+
+      if (intent == "read_calendar_events") {
+        if (
+          checkSelfPermission(context, android.Manifest.permission.READ_CALENDAR) !=
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+          val permissionAction =
+            RequestPermissionAgentAction(permission = android.Manifest.permission.READ_CALENDAR)
+          _actionChannel.send(permissionAction)
+          val granted = permissionAction.result.await()
+          if (!granted) {
+            Log.e(TAG, "READ_CALENDAR permission denied by user")
+            return@runBlocking mapOf(
+              "action" to intent,
+              "parameters" to parameters,
+              "result" to "failed: missing READ_CALENDAR permission",
+            )
+          }
+        }
+      }
+
       _actionChannel.send(
         SkillProgressAgentAction(
           label = "Executing intent \"$intent\"",
