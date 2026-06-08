@@ -57,6 +57,7 @@ private const val TAG = "AGLlmChatViewModel"
 open class LlmChatViewModelBase(
   private val systemPromptRepository: SystemPromptRepository? = null,
   userDataDataStore: DataStore<UserData>? = null,
+  private val modelFeedbackRepository: Any? = null,
 ) : ChatViewModel(userDataDataStore) {
   private val _uiSystemPrompt = MutableStateFlow("")
   val uiSystemPrompt = _uiSystemPrompt.asStateFlow()
@@ -326,10 +327,13 @@ open class LlmChatViewModelBase(
     onDone: () -> Unit = {},
     enableConversationConstrainedDecoding: Boolean = false,
     initialMessages: List<Message> = listOf(),
+    clearHistory: Boolean = true,
   ) {
     viewModelScope.launch(Dispatchers.Default) {
       setIsResettingSession(true)
-      clearAllMessages(model = model)
+      if (clearHistory) {
+        clearAllMessages(model = model)
+      }
       stopResponse(model = model)
 
       while (true) {
@@ -401,12 +405,26 @@ open class LlmChatViewModelBase(
         task = task,
         model = model,
         onDone = {
-          modelManagerViewModel.initializeModel(context = context, task = task, model = model)
-
-          // Add a warning message for re-initializing the session.
-          addMessage(
+          modelManagerViewModel.initializeModel(
+            context = context,
+            task = task,
             model = model,
-            message = ChatMessageWarning(content = "Session re-initialized"),
+            onDone = {
+              // Add a warning message for re-initializing the session.
+              addMessage(
+                model = model,
+                message = ChatMessageWarning(content = "Session re-initialized"),
+              )
+            },
+            onError = {
+              addMessage(
+                model = model,
+                message =
+                  ChatMessageError(
+                    content = "Failed to re-initialize session, please restart the app"
+                  ),
+              )
+            },
           )
         },
       )
@@ -420,7 +438,7 @@ class LlmChatViewModel
 constructor(
   systemPromptRepository: SystemPromptRepository,
   userDataDataStore: DataStore<UserData>,
-) : LlmChatViewModelBase(systemPromptRepository, userDataDataStore)
+) : LlmChatViewModelBase(systemPromptRepository, userDataDataStore, null)
 
 @HiltViewModel
 class LlmAskImageViewModel
@@ -428,7 +446,7 @@ class LlmAskImageViewModel
 constructor(
   systemPromptRepository: SystemPromptRepository,
   userDataDataStore: DataStore<UserData>,
-) : LlmChatViewModelBase(systemPromptRepository, userDataDataStore)
+) : LlmChatViewModelBase(systemPromptRepository, userDataDataStore, null)
 
 @HiltViewModel
 class LlmAskAudioViewModel
@@ -436,4 +454,4 @@ class LlmAskAudioViewModel
 constructor(
   systemPromptRepository: SystemPromptRepository,
   userDataDataStore: DataStore<UserData>,
-) : LlmChatViewModelBase(systemPromptRepository, userDataDataStore)
+  ) : LlmChatViewModelBase(systemPromptRepository, userDataDataStore, null)

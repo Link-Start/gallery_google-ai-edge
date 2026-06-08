@@ -16,7 +16,11 @@
 
 package com.google.ai.edge.gallery.ui.common.chat
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.graphics.Bitmap
+import android.util.Log
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.Spring
@@ -42,15 +46,24 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ThumbDown
+import androidx.compose.material.icons.filled.ThumbUp
+import androidx.compose.material.icons.outlined.ThumbDown
+import androidx.compose.material.icons.outlined.ThumbUp
 import androidx.compose.material.icons.outlined.Timer
+import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
@@ -78,6 +91,7 @@ import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.dimensionResource
@@ -118,15 +132,18 @@ fun ChatPanel(
   selectedModel: Model,
   viewModel: ChatViewModel,
   innerPadding: PaddingValues,
+  modifier: Modifier = Modifier,
+  skillCount: Int = 0,
+  mcpCount: Int = 0,
   onSendMessage: (Model, List<ChatMessage>) -> Unit,
   onRunAgainClicked: (Model, ChatMessage) -> Unit,
   onBenchmarkClicked: (Model, ChatMessage, warmUpIterations: Int, benchmarkIterations: Int) -> Unit,
   navigateUp: () -> Unit,
-  modifier: Modifier = Modifier,
   onStreamImageMessage: (Model, ChatMessageImage) -> Unit = { _, _ -> },
   onStreamEnd: (Int) -> Unit = {},
   onStopButtonClicked: () -> Unit = {},
   onSkillClicked: () -> Unit = {},
+  onMcpClicked: () -> Unit = {},
   onImageSelected: (bitmaps: List<Bitmap>, selectedBitmapIndex: Int) -> Unit = { _, _ -> },
   showStopButtonInInputWhenInProgress: Boolean = false,
   showImagePicker: Boolean = false,
@@ -137,8 +154,15 @@ fun ChatPanel(
   val modelManagerUiState by modelManagerViewModel.uiState.collectAsState()
   val messages = uiState.messagesByModel[selectedModel.name] ?: listOf()
   val modelInitializationStatus = modelManagerUiState.modelInitializationStatus[selectedModel.name]
-  val snackbarHostState = remember { SnackbarHostState() }
   val scope = rememberCoroutineScope()
+  val snackbarHostState = remember { SnackbarHostState() }
+  val context = LocalContext.current
+  val clipboard =
+    remember(context) { context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager }
+  val copyToClipboard: (String) -> Unit =
+    remember(clipboard) {
+      { text -> clipboard.setPrimaryClip(ClipData.newPlainText("message", text)) }
+    }
   val imageCountToLastConfigChange =
     remember(messages) {
       var imageCount = 0
@@ -176,6 +200,9 @@ fun ChatPanel(
   val benchmarkMessage: MutableState<ChatMessage?> = remember { mutableStateOf(null) }
 
   var showErrorDialog by remember { mutableStateOf(false) }
+  var showFeedbackDialog by remember { mutableStateOf(false) }
+  var isPositiveFeedback by remember { mutableStateOf(true) }
+  var feedbackMessageIndex by remember { mutableIntStateOf(-1) }
 
   var showAudioRecorder by remember { mutableStateOf(false) }
   var curAmplitude by remember { mutableIntStateOf(0) }
@@ -471,6 +498,7 @@ fun ChatPanel(
                             } else {
                               12.dp
                             },
+                          onCopyClicked = copyToClipboard,
                         )
 
                       // Image
@@ -503,6 +531,7 @@ fun ChatPanel(
                         MessageBodyThinking(
                           thinkingText = message.content,
                           inProgress = message.inProgress,
+                          onCopyClicked = copyToClipboard,
                         )
 
                       else -> {}
@@ -515,6 +544,19 @@ fun ChatPanel(
                       horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                       LatencyText(message = message)
+                      if (message is ChatMessageText && !uiState.inProgress) {
+                        IconButton(
+                          onClick = { copyToClipboard(message.content) },
+                          modifier = Modifier.size(28.dp),
+                        ) {
+                          Icon(
+                            imageVector = Icons.Rounded.ContentCopy,
+                            contentDescription = stringResource(R.string.copy),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                            modifier = Modifier.size(18.dp),
+                          )
+                        }
+                      }
                     }
                   } else if (message.side == ChatSide.USER) {
                     Row(
@@ -633,6 +675,8 @@ fun ChatPanel(
         modelPreparing = uiState.preparing,
         imageCount = imageCountToLastConfigChange,
         audioClipMessageCount = audioClipMesssageCountToLastconfigChange,
+        skillCount = skillCount,
+        mcpCount = mcpCount,
         modelInitializing =
           modelInitializationStatus?.status == ModelInitializationStatusType.INITIALIZING,
         textFieldPlaceHolderRes = task.textInputPlaceHolderRes,
@@ -663,10 +707,12 @@ fun ChatPanel(
         },
         onAmplitudeChanged = { curAmplitude = it },
         onSkillsClicked = onSkillClicked,
+        onMcpClicked = onMcpClicked,
         onPickedImagesChanged = { pickedImagesCount = it.size },
         onPickedAudioClipsChanged = { pickedAudioClipsCount = it.size },
         showPromptTemplatesInMenu = false,
         showSkillsPicker = task.id === BuiltInTaskId.LLM_AGENT_CHAT,
+        showMcpPicker = task.id === BuiltInTaskId.LLM_AGENT_CHAT,
         showImagePicker = selectedModel.llmSupportImage && showImagePicker,
         showAudioPicker = selectedModel.llmSupportAudio && showAudioPicker,
         showStopButtonWhenInProgress = showStopButtonInInputWhenInProgress,
